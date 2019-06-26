@@ -87,7 +87,7 @@ class _ConvTransposeMixin(object):
             if len(output_size) != k:
                 raise ValueError(
                     "output_size must have {} or {} elements (got {})"
-                    .format(k, k + 2, len(output_size)))
+                        .format(k, k + 2, len(output_size)))
 
             min_sizes = torch.jit.annotate(List[int], [])
             max_sizes = torch.jit.annotate(List[int], [])
@@ -105,7 +105,7 @@ class _ConvTransposeMixin(object):
                     raise ValueError((
                         "requested an output size of {}, but valid sizes range "
                         "from {} to {} (for an input of {})").format(
-                            output_size, min_sizes, max_sizes, input.size()[2:]))
+                        output_size, min_sizes, max_sizes, input.size()[2:]))
 
             res = torch.jit.annotate(List[int], [])
             for d in range(k):
@@ -119,7 +119,6 @@ class _ConvTransposeMixin(object):
 class SingleDeconvLayer(_ConvTransposeMixin, _ConvNd):
 
     def __init__(self, kernel, stride=1, padding=0, output_padding=0, groups=1, bias=True, dilation=1):
-
         in_channels, out_channels, kernel_size = kernel.shape[1], kernel.shape[0], kernel.shape[2]
         kernel_size = _pair(kernel_size)
         stride = _pair(stride)

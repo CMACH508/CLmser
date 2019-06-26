@@ -63,7 +63,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PyTorch Template')
     parser.add_argument('-c', '--config', default='config.json', type=str,
                         help='config file path (default: None)')
-    parser.add_argument('-r', '--resume', default='trained/ex2.pth', type=str,
+    parser.add_argument('-r', '--resume', default='trained/ex1.pth', type=str,
                         help='path to latest checkpoint (default: None)')
     parser.add_argument('--results_dir', default='results', type=str,
                         help='output dictionary')

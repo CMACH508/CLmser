@@ -8,6 +8,7 @@ from utils.util import ensure_dir
 from tensorboardX import SummaryWriter
 import numpy as np
 
+
 class BaseTrainer:
     """
     Base class for all trainers
@@ -24,7 +25,6 @@ class BaseTrainer:
         self.metrics = metrics
         self.optimizer = optimizer
         self.train_logger = train_logger
-
 
         cfg_trainer = config['trainer']
         self.epochs = cfg_trainer['epochs']
@@ -136,7 +136,7 @@ class BaseTrainer:
 
             if epoch % self.save_every == 0:
                 self._save_checkpoint(epoch, save_best=best)
-        np.save(self.writer_dir+'/training_loss.npy', training_loss)
+        np.save(self.writer_dir + '/training_loss.npy', training_loss)
 
     def _train_epoch(self, epoch, training_loss):
         """

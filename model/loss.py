@@ -9,6 +9,4 @@ class Loss(nn.Module):
 
     def forward(self, image, fake):
         loss = self.mse_loss(image, fake)
-        # for i in range(4):
-        #     loss += self.mse_loss(up1[i], up2[i])
         return loss
