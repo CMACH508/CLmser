@@ -1,0 +1,61 @@
+{
+    "model_name": "cae",
+    "dataset_name":"celebahq",
+    "arch": {
+        "type": "Generator",
+        "args": {}
+    },
+    "n_gpu": 1,
+    "data_loader": {
+        "type": "CelebAHQDataLoader",
+        "args": {
+            "img_dir": "data/CelebAHQ/train",
+            "img_list": "data/CelebAHQ/train",
+            "mask_dir": "data/masks/train",
+            "batch_size": 16,
+            "img_size": 256,
+            "shuffle": true,
+            "num_workers": 4
+        }
+    },
+    "val_data_loader": {
+        "type": "CelebAHQDataLoader",
+        "args": {
+            "img_dir": "data/CelebAHQ/test",
+            "img_list": "data/CelebAHQ/test",
+            "mask_dir": "data/masks/test",
+            "batch_size": 16,
+            "img_size": 256,
+            "shuffle": false,
+            "num_workers": 4
+        }
+    },
+    "optimizer": {
+        "type": "Adam",
+        "args": {
+            "lr": 0.001,
+            "weight_decay": 0,
+            "amsgrad": true
+        }
+    },
+    "metrics": [
+        "l1_loss", "psnr", "ssim", "mse"
+    ],
+    "lr_scheduler": {
+        "type": "MultiStepLR",
+        "args": {
+            "milestones": [20, 40],
+            "gamma": 0.1
+        }
+    },
+    "trainer": {
+        "epochs": 50,
+        "save_dir": "saved",
+        "save_period": 10,
+        "val_period": 1,
+        "verbosity": 2,
+        "monitor": "min val_loss",
+        "early_stop": 50,
+        "tensorboard": true
+    }
+}

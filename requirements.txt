@@ -1,0 +1,5 @@
+torchvision==0.2.0
+tqdm
+pandas
+opencv-python
+tensorboardX

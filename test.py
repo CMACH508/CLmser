@@ -1,81 +1,78 @@
-import os
-import json
 import argparse
+import random
+import collections
 import torch
-from tqdm import tqdm
-import data_loader.dataloaders as module_data
-import model.metric as module_metric
-import model.models as module_arch
-from model.loss import Loss as module_loss
 import numpy as np
-from utils.util import _save_image, ensure_dir
+from importlib import import_module
+import data_loader.data_loaders as module_data
+from model.loss import Loss
+import evaluations.metric as module_metric
+from parse_config import ConfigParser
+from logger import TensorboardWriter
+from eval import evaluate, save_comp_images, cal_per_frame_time
+
+# fix random seeds for reproducibility
+SEED = 123
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = True
+np.random.seed(SEED)
+random.seed(SEED)
 
 
-def get_instance(module, name, config, *args):
-    return getattr(module, config[name]['type'])(*args, **config[name]['args'])
+def main(config):
+    logger = config.get_logger('test')
+    writer = TensorboardWriter(config.log_dir, logger, enabled=True)
 
+    # setup data_loader instances
+    data_loader = config.init_obj('val_data_loader', module_data, 'test')
+    print(len(data_loader))
 
-def main(config, args):
-    data_loader = get_instance(module_data, 'data_loader', config, 'test')
-
-    model = get_instance(module_arch, 'model', config)
-    device = torch.device('cuda:' + str(config['gpu']))
-    loss_fn = module_loss()
-    model = model.to(device)
-    metric_fns = [getattr(module_metric, met) for met in config['metrics']]
-
-    checkpoint = torch.load(args.resume)
+    # build model architecture, then print to console
+    module_arch = import_module('model.' + config['model_name'])
+    model = config.init_obj('arch', module_arch)
+    logger.info('Loading checkpoint: {} ...'.format(config.resume))
+    checkpoint = torch.load(config.resume)
     state_dict = checkpoint['state_dict']
+    if config['n_gpu'] > 1:
+        model = torch.nn.DataParallel(model)
     model.load_state_dict(state_dict)
 
     # prepare model for testing
-
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
     model.eval()
 
-    total_loss = 0.0
-    total_metrics = torch.zeros(len(metric_fns))
-    ensure_dir(args.results_dir)
-    with torch.no_grad():
-        for batch_idx, gt_image in enumerate(tqdm(data_loader)):
-            mask = np.ones_like(gt_image.numpy())
-            # mask[:, :,  0:80, 0:50] = 0
-            # mask[:, :,  0:80,0:110] = 0
-            gt_image = gt_image.to(device)
-            image = gt_image * torch.Tensor(mask).to(device)
-            logit, fake = model(image)
-            loss = loss_fn(gt_image, fake)
-            batch_size = gt_image.shape[0]
-            total_loss += loss.item() * batch_size
-            for i, metric in enumerate(metric_fns):
-                total_metrics[i] += metric(gt_image, fake) * batch_size
-            if batch_idx == 0:
-                _save_image(args.results_dir, image, 'masked')
-                _save_image(args.results_dir, gt_image, 'gt')
-                _save_image(args.results_dir, fake, 'fake')
+    # get function handles of loss and metrics
+    criterion = Loss()
+    metric_fns = [getattr(module_metric, met) for met in config['metrics']]
 
-    n_samples = len(data_loader.sampler)
-    log = {'loss': total_loss / n_samples}
-    log.update({met.__name__: total_metrics[i].item() / n_samples for i, met in enumerate(metric_fns)})
-    print(log)
+    # calculate metrics
+    evaluate(model, data_loader, writer, logger, criterion, metric_fns)
+
+    # save qualitative results
+    save_comp_images(model, data_loader, config)
+    # cal_per_frame_time(model, data_loader)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PyTorch Template')
-    parser.add_argument('-c', '--config', default='config.json', type=str,
-                        help='config file path (default: None)')
-    parser.add_argument('-r', '--resume', default='trained/ex1.pth', type=str,
-                        help='path to latest checkpoint (default: None)')
-    parser.add_argument('--results_dir', default='results', type=str,
-                        help='output dictionary')
-    args = parser.parse_args()
+    args = argparse.ArgumentParser(description='PyTorch Template')
+    args.add_argument('-c', '--config', default=None, type=str,
+                      help='config file path (default: None)')
+    args.add_argument('-r', '--resume', default=None, type=str,
+                      help='path to latest checkpoint (default: None)')
+    args.add_argument('-d', '--device', default=None, type=str,
+                      help='indices of GPUs to enable (default: all)')
+    args.add_argument('-i', '--run_id', default='0', type=str,
+                      help='run id (default: all)')
 
-    if args.config:
-        # load config file
-        config = json.load(open(args.config))
-        path = os.path.join(config['trainer']['model_dir'], config['name'])
-    else:
-        raise AssertionError("Configuration file need to be specified. Add '-c config.json', for example.")
-
-    main(config, args)
-
-
+    # custom cli options to modify configuration from default values given in json file.
+    CustomArgs = collections.namedtuple('CustomArgs', 'flags type target')
+    options = [
+        CustomArgs(['--bs', '--batch_size'], type=int, target='data_loader;args;batch_size'),
+        CustomArgs(['--mn', '--model_name'], type=str, target='model_name'),
+        CustomArgs(['--out', '--output_dir'], type=str, target='trainer;save_dir'),
+    ]
+    config = ConfigParser.from_args(args, options)
+    main(config)

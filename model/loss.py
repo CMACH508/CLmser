@@ -1,12 +1,11 @@
+import torch.nn.functional as F
 import torch.nn as nn
+import torch
 
 
 class Loss(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(Loss, self).__init__()
         self.mse_loss = nn.MSELoss()
-        self.cross_loss = nn.CrossEntropyLoss()
 
-    def forward(self, image, fake):
-        loss = self.mse_loss(image, fake)
-        return loss
+
