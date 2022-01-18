@@ -1,91 +1,15 @@
-import os
-import numpy as np
+import json
+import pandas as pd
 import torch
-from torchvision.utils import save_image
-import matplotlib.pyplot as plt
 import math
-from sklearn.manifold import TSNE
-import torch.nn.functional as F
+from torchvision.utils import save_image
+from pathlib import Path
+from itertools import repeat
+from collections import OrderedDict
+import numpy as np
+
 MEAN = [0.5, 0.5, 0.5]
 STD = [0.5, 0.5, 0.5]
-
-
-def load_model(module, name, path, args=None, device='cuda:0'):
-    """
-    prepare classifier and defense model
-    :return: defense_model, classifier in eval state
-    """
-    # build
-    model = getattr(module, name)(**args)
-    model = model.to(device)
-    checkpoint = torch.load(path)
-    state_dict = checkpoint['state_dict']
-    model.load_state_dict(state_dict)
-    model.eval()
-    return model
-
-
-def ensure_dir(path):
-    if not os.path.exists(path):
-        os.makedirs(path)
-
-
-def unnormalize(x):
-    x = x.transpose(1, 3)
-    x = x * torch.Tensor(STD).to(x.get_device()) + torch.Tensor(MEAN).to(x.get_device())
-    x = x.transpose(1, 3)
-    return x
-
-
-def select_act_func(actfun):
-    if actfun == None:
-        return lambda x: x
-    else:
-        return eval('F.' + actfun)
-
-
-def read_form_list(file, num):
-    flist = []
-    with open(file, 'r') as f:
-        for line in f:
-            flist.append(list(line.strip('\n').split(',')))
-        return flist
-
-
-def tsne_(inputs, labels, title):
-    y_tsne = TSNE(n_components=2).fit_transform(inputs)
-    plot_tsne_embedding(y_tsne, labels, title)
-    plt.show()
-    return
-
-
-def plot_tsne_embedding(data, label, title):
-    """ plot tsne embedding """
-    x_min, x_max = np.min(data, 0), np.max(data, 0)
-    data = (data - x_min) / (x_max - x_min)
-    fig = plt.figure()
-    ax = plt.subplot(111)
-    for i in range(data.shape[0]):
-        plt.text(data[i, 0], data[i, 1], str(label[i]),
-                 color=plt.cm.tab10(label[i]),
-                 fontdict={'weight': 'bold', 'size': 9})
-    plt.xticks([])
-    plt.yticks([])
-    plt.title(title)
-    return fig
-
-
-def cal_meancode(code, labels, flag, batch_size):
-    """calculate mean code of specific class"""
-    indexes = []
-    for i in range(batch_size):
-        if labels[i] == flag:
-            indexes.append(i)
-    codes = []
-    for j in indexes:
-        codes.append(code[j])
-    mean_code = np.round(np.mean(codes, axis=0), 2)
-    return mean_code
 
 
 def _save_image(img_dir, image, name):
@@ -93,3 +17,68 @@ def _save_image(img_dir, image, name):
     nrow = int(math.sqrt(image.shape[0]))
     save_image(image.cpu(), file_name, nrow=nrow, padding=2, normalize=True)
     return
+
+
+def tensor2im(image_tensor, bytes=255.0, imtype=np.uint8):
+    if image_tensor.dim() == 3:
+        image_numpy = image_tensor.cpu().float().numpy()
+    else:
+        image_numpy = image_tensor[0].cpu().float().numpy()
+    image_numpy = (np.transpose(image_numpy, (1, 2, 0)) + 1) / 2.0 * bytes
+
+    return image_numpy.astype(imtype)
+
+
+def postprocess(x):
+    x = x.transpose(1, 3)
+    x = x * torch.Tensor(STD).cuda() + torch.Tensor(MEAN).cuda()
+    x = x.transpose(1, 3)
+    return x
+
+
+def ensure_dir(dirname):
+    dirname = Path(dirname)
+    if not dirname.is_dir():
+        dirname.mkdir(parents=True, exist_ok=False)
+
+
+def read_json(fname):
+    fname = Path(fname)
+    with fname.open('rt') as handle:
+        return json.load(handle, object_hook=OrderedDict)
+
+
+def write_json(content, fname):
+    fname = Path(fname)
+    with fname.open('wt') as handle:
+        json.dump(content, handle, indent=4, sort_keys=False)
+
+
+def inf_loop(data_loader):
+    ''' wrapper function for endless data loader. '''
+    for loader in repeat(data_loader):
+        yield from loader
+
+
+class MetricTracker:
+    def __init__(self, *keys, writer=None):
+        self.writer = writer
+        self._data = pd.DataFrame(index=keys, columns=['total', 'counts', 'average'])
+        self.reset()
+
+    def reset(self):
+        for col in self._data.columns:
+            self._data[col].values[:] = 0
+
+    def update(self, key, value, n=1):
+        if self.writer is not None:
+            self.writer.add_scalar(key, value)
+        self._data.total[key] += value * n
+        self._data.counts[key] += n
+        self._data.average[key] = self._data.total[key] / self._data.counts[key]
+
+    def avg(self, key):
+        return self._data.average[key]
+
+    def result(self):
+        return dict(self._data.average)

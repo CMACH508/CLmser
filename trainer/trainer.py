@@ -1,122 +1,124 @@
 import torch
 import numpy as np
-import math
-from torchvision.utils import save_image
-
+from torchvision.utils import make_grid
 from base import BaseTrainer
+from utils import inf_loop, MetricTracker
 
 
 class Trainer(BaseTrainer):
     """
     Trainer class
-
-    Note:
-        Inherited from BaseTrainer.
-
     """
 
-    def __init__(self, model, loss, metrics, optimizer, resume, config, data_loader,
-                 valid_data_loader, lr_scheduler=None, train_logger=None):
-        super(Trainer, self).__init__(model, loss, metrics, optimizer, resume, config, train_logger)
+    def __init__(self, net, criterion, metric_ftns, optimizer,
+                 config, data_loader, valid_data_loader=None, lr_scheduler=None,
+                 len_epoch=None):
+        super().__init__(net, criterion, metric_ftns,
+                         optimizer, config)
         self.config = config
         self.data_loader = data_loader
+        self.iteration = 0
+        if len_epoch is None:
+            # epoch-based training
+            self.len_epoch = len(self.data_loader)
+        else:
+            # iteration-based training
+            self.data_loader = inf_loop(data_loader)
+            self.len_epoch = len_epoch
         self.valid_data_loader = valid_data_loader
         self.do_validation = self.valid_data_loader is not None
         self.lr_scheduler = lr_scheduler
-        self.train_logger = train_logger
+        self.log_step = int(np.sqrt(data_loader.batch_size))
+        self.visual_step = int(len(data_loader) // 10)
 
-    def _eval_metrics(self, output, target, split):
-        acc_metrics = np.zeros(len(self.metrics))
-        for i, metric in enumerate(self.metrics):
-            acc_metrics[i] += metric(output, target)
-            self.writer.add_scalar(split + '/' + f'{metric.__name__}', acc_metrics[i])
-        return acc_metrics
+        self.train_metrics = MetricTracker('loss', writer=self.writer)
+        self.valid_metrics = MetricTracker('loss', writer=self.writer)
+        # self.valid_metrics = MetricTracker('loss', *[m.__name__ for m in self.metric_ftns],
+        #                                    writer=self.writer)
 
-    def _save_image(self, image, name, epoch, split):
-        file_name = self.img_dir + '/{}_{}_'.format(split, epoch) + name + '.jpg'
-        nrow = int(math.sqrt(self.batch_size))
-        save_image(image.cpu(), file_name, nrow=nrow, padding=2, normalize=True)
-        return
-
-    def _train_epoch(self, epoch, training_loss):
+    def _train_epoch(self, epoch):
         """
         Training logic for an epoch
 
-        :param epoch: Current training epoch.
-        :return: A log that contains all information you want to save.
-
-        Note:
-            If you have additional information to record, for example:
-                > additional_log = {"x": x, "y": y}
-            merge it with log before return. i.e.
-                > log = {**log, **additional_log}
-                > return log
-
-            The metrics in log must have the key 'metrics'.
+        :param epoch: Integer, current training epoch.
+        :return: A log that contains average loss and metric in this epoch.
         """
+
         self.model.train()
-        total_loss = 0
-        total_metrics = np.zeros(len(self.metrics))
-        for batch_idx, gt_image in enumerate(self.data_loader):
-            gt_image = gt_image.to(self.device)
+        self.train_metrics.reset()
+        for batch_idx, (image, mask, _) in enumerate(self.data_loader):
+            image, mask = image.to(self.device), mask.to(self.device)
+            masked_img = image * mask
+            pred_img = self.model(masked_img)
+            comp_img = image * mask + (1 - mask) * pred_img
+            self.writer.set_step((epoch - 1) * self.len_epoch + batch_idx)
+
+            loss = self.loss.mse_loss(pred_img, image)
             self.optimizer.zero_grad()
-            logit, fake = self.model(gt_image)
-            loss = self.loss(gt_image, fake)
             loss.backward()
             self.optimizer.step()
-            iter_id = (epoch - 1) * len(self.data_loader) + batch_idx
-            self.writer.add_scalar('train/loss', loss.item(), iter_id)
-            training_loss.append(loss.item())
-            total_loss += loss.item()
-            total_metrics += self._eval_metrics(gt_image, fake, 'train')
-            if batch_idx == 0:
-                self._save_image(gt_image, 'gt', epoch, 'train')
-                self._save_image(fake, 'fake', epoch, 'train')
-            if batch_idx % self.log_every == 0:
-                self.logger.info('Train Epoch: {} [{}/{} ({:.0f}%)] Loss: {:.6f}'.format(
+
+            if batch_idx % self.log_step == 0:
+                self.train_metrics.update('loss', loss.item())
+                self.logger.debug('Train Epoch: {} {} Loss: {:.6f}'.format(
                     epoch,
-                    batch_idx * self.data_loader.batch_size,
-                    self.data_loader.n_samples,
-                    100.0 * batch_idx / len(self.data_loader),
-                    loss.item()))
+                    self._progress(batch_idx),
+                    loss.item()
+                ))
+            if batch_idx % self.visual_step == 0:
+                self.writer.add_image('gt', make_grid(image.cpu(), nrow=8, normalize=True))
+                self.writer.add_image('masked', make_grid(masked_img.cpu(), nrow=8, normalize=True))
+                self.writer.add_image('comp', make_grid(comp_img.cpu(), nrow=8, normalize=True))
+                self.writer.add_image('pred', make_grid(pred_img.cpu(), nrow=8, normalize=True))
 
-        log = {
-            'loss': total_loss / len(self.data_loader),
-            'metrics': (total_metrics / len(self.data_loader)).tolist()
-        }
-        if self.do_validation:
+            if batch_idx == self.len_epoch:
+                break
+        log = self.train_metrics.result()
+
+        if self.do_validation and epoch % self.config['trainer']['val_period'] == 0:
             val_log = self._valid_epoch(epoch)
-            log = {**log, **val_log}
+            log.update(**{'val_' + k: v for k, v in val_log.items()})
 
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.step()
-
-        return log, training_loss
+        return log
 
     def _valid_epoch(self, epoch):
         """
         Validate after training an epoch
 
+        :param epoch: Integer, current training epoch.
         :return: A log that contains information about validation
-
-        Note:
-            The validation metrics in log must have the key 'val_metrics'.
         """
         self.model.eval()
-        total_val_loss = 0
-        total_val_metrics = np.zeros(len(self.metrics))
+        self.valid_metrics.reset()
         with torch.no_grad():
-            for batch_idx, gt_image in enumerate(self.valid_data_loader):
-                gt_image = gt_image.to(self.device)
-                logit, fake = self.model(gt_image)
-                loss = self.loss(gt_image, fake)
-                total_val_loss += loss.item()
-                total_val_metrics += self._eval_metrics(gt_image, fake, 'val')
-                self.writer.add_scalar('val/total_loss', total_val_loss, epoch)
+            for batch_idx, (image, mask,_) in enumerate(self.valid_data_loader):
+                image, mask = image.to(self.device), mask.to(self.device)
+                masked_img = image * mask
+                pred_img = self.model(masked_img)
+                comp_img = image * mask + (1 - mask) * pred_img
+                loss = self.loss.mse_loss(pred_img, image)
+                self.writer.set_step((epoch - 1) * len(self.valid_data_loader) + batch_idx, 'valid')
+                self.valid_metrics.update('loss', loss.item())
+                # for met in self.metric_ftns:
+                #     self.valid_metrics.update(met.__name__, met(image, comp_img))
                 if batch_idx == 0:
-                    self._save_image(gt_image, 'gt', epoch, '  val')
-                    self._save_image(fake, 'fake', epoch, 'val')
-        return {
-            'val_loss': total_val_loss / len(self.valid_data_loader),
-            'val_metrics': (total_val_metrics / len(self.valid_data_loader)).tolist()
-        }
+                    self.writer.add_image('gt', make_grid(image.cpu(), nrow=8, normalize=True))
+                    self.writer.add_image('masked', make_grid(masked_img.cpu(), nrow=8, normalize=True))
+                    self.writer.add_image('comp', make_grid(comp_img.cpu(), nrow=8, normalize=True))
+                    self.writer.add_image('pred', make_grid(pred_img.cpu(), nrow=8, normalize=True))
+
+        # add histogram of model parameters to the tensorboard
+        # for name, p in self.model.named_parameters():
+        #     self.writer.add_histogram(name, p, bins='auto')
+
+        return self.valid_metrics.result()
+
+    def _progress(self, batch_idx):
+        base = '[{}/{} ({:.0f}%)]'
+        if hasattr(self.data_loader, 'n_samples'):
+            current = batch_idx * self.data_loader.batch_size
+            total = self.data_loader.n_samples
+        else:
+            current = batch_idx
+            total = self.len_epoch
+        return base.format(current, total, 100.0 * current / total)

@@ -1,63 +1,73 @@
-import os
-import json
 import argparse
+import random
+import collections
 import torch
+import numpy as np
+from importlib import import_module
+from trainer import Trainer
+import data_loader.data_loaders as module_data
+from model.loss import Loss
+import evaluations.metric as module_metric
+from parse_config import ConfigParser
 
-from utils import Logger
-from trainer.trainer import Trainer
-import data_loader.dataloaders as module_data
-import model.metric as module_metric
-import model.models as module_arch
-from model.loss import Loss as module_loss
+# fix random seeds for reproducibility
+SEED = 123
+torch.manual_seed(SEED)
+torch.cuda.manual_seed_all(SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = True
+np.random.seed(SEED)
+random.seed(SEED)
 
 
-def get_instance(module, name, config, *args):
-    return getattr(module, config[name]['type'])(*args, **config[name]['args'])
+def main(config):
+    logger = config.get_logger('train')
 
+    # setup data_loader instances
+    data_loader = config.init_obj('data_loader', module_data, 'train')
+    print("training images = %d" % len(data_loader.dataset))
+    valid_data_loader = config.init_obj('val_data_loader', module_data, 'test')
 
-def main(config, args):
-    train_logger = Logger()
-    data_loader = get_instance(module_data, 'data_loader', config, 'train')
-    valid_data_loader = get_instance(module_data, 'data_loader', config, 'val')
-
-    model = get_instance(module_arch, 'model', config)
-
-    loss = module_loss()
-    metrics = [getattr(module_metric, met) for met in config['metrics']]
-
-    if args.resume is not None:
-        checkpoint = torch.load(args.resume)
-        state_dict = checkpoint['state_dict']
-        model.load_state_dict(state_dict)
+    # build model architecture, then print to console
+    module_arch = import_module('model.' + config['model_name'])
+    model = config.init_obj('arch', module_arch)
+    logger.info(model)
 
     # build optimizer, learning rate scheduler
-    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
-    optimizer = get_instance(torch.optim, 'optimizer', config, trainable_params)
-    lr_scheduler = get_instance(torch.optim.lr_scheduler, 'lr_scheduler', config, optimizer)
+    optimiser = config.init_obj('optimizer', torch.optim, model.parameters())
+    lr_scheduler = config.init_obj('lr_scheduler', torch.optim.lr_scheduler, optimiser)
 
-    trainer = Trainer(model, loss, metrics, optimizer,
-                      resume=args.resume,
+    # get function handles of loss and metrics
+    criterion = Loss()
+    metrics = [getattr(module_metric, met) for met in config['metrics']]
+
+    trainer = Trainer(model, criterion, metrics, optimiser,
                       config=config,
                       data_loader=data_loader,
                       valid_data_loader=valid_data_loader,
-                      lr_scheduler=lr_scheduler,
-                      train_logger=train_logger)
+                      lr_scheduler=lr_scheduler)
+
     trainer.train()
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='PyTorch Template')
-    parser.add_argument('-c', '--config', default='config.json', type=str,
-                        help='config file path (default: None)')
-    parser.add_argument('-r', '--resume', default=None, type=str,
-                        help='path to latest checkpoint (default: None)')
-    args = parser.parse_args()
+    args = argparse.ArgumentParser(description='PyTorch Template')
+    args.add_argument('-c', '--config', default=None, type=str,
+                      help='config file path (default: None)')
+    args.add_argument('-r', '--resume', default=None, type=str,
+                      help='path to latest checkpoint (default: None)')
+    args.add_argument('-d', '--device', default=None, type=str,
+                      help='indices of GPUs to enable (default: all)')
+    args.add_argument('-i', '--run_id', default='0', type=str,
+                      help='run id (default: all)')
 
-    if args.config:
-        # load config file
-        config = json.load(open(args.config))
-        path = os.path.join(config['trainer']['model_dir'], config['name'])
-    else:
-        raise AssertionError("Configuration file need to be specified. Add '-c config.json', for example.")
-
-    main(config, args)
+    # custom cli options to modify configuration from default values given in json file.
+    CustomArgs = collections.namedtuple('CustomArgs', 'flags type target')
+    options = [
+        CustomArgs(['--lr', '--learning_rate'], type=float, target='optimizer;args;lr'),
+        CustomArgs(['--bs', '--batch_size'], type=int, target='data_loader;args;batch_size'),
+        CustomArgs(['--mn', '--model_name'], type=str, target='model_name'),
+        CustomArgs(['--dn', '--dataset_name'], type=str, target='dataset'),
+    ]
+    config = ConfigParser.from_args(args, options)
+    main(config)
